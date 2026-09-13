@@ -265,7 +265,7 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 <script>
 // ========== CORS 代理配置 ==========
 var CORS_PROXIES = [
-  function(url) { return 'https://proxy.cors.sh/' + url; },
+  function(url) { return 'https://ys.ggy.ccwu.cc/?url=' + encodeURIComponent(url); },
   function(url) { return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url); },
   function(url) { return 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url); }
 ];
