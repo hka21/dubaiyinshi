@@ -1542,7 +1542,33 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += '}';
 
   // M3U8播放函数
-  html += 'function playM3u8(url,video,attempt){if(typeof Hls==="undefined"){video.src=url;video.muted=false;video.play().then(function(){tryResume();}).catch(function(){hideLoading();showToast("不支持此视频格式");});return;}if(attempt===0)tryDirect(url,video,function(ok){if(!ok){showToast("直连失败，切换代理中...");playM3u8(url,video,1);}});else if(attempt<=CORS_PROXIES.length)tryProxy(CORS_PROXIES[attempt-1](url),video,attempt-1,function(ok){if(!ok&&attempt<CORS_PROXIES.length)playM3u8(url,video,attempt+1);else if(!ok){hideLoading();showToast("所有代理均播放失败，请换源");}});else{hideLoading();showToast("播放失败，请换源");}}';
+function playM3u8(url, video, attempt) {
+  if (typeof Hls === "undefined") {
+    video.src = url;
+    video.muted = false;
+    video.play().then(function () { tryResume(); }).catch(function () {
+      hideLoading();
+      showToast("不支持此视频格式");
+    });
+    return;
+  }
+  // 跳过直连，直接用第一个代理（你的 Worker）
+  if (attempt === 0) {
+    playM3u8(url, video, 1);
+  } else if (attempt <= CORS_PROXIES.length) {
+    tryProxy(CORS_PROXIES[attempt - 1](url), video, attempt - 1, function (ok) {
+      if (!ok && attempt < CORS_PROXIES.length) {
+        playM3u8(url, video, attempt + 1);
+      } else if (!ok) {
+        hideLoading();
+        showToast("所有代理均播放失败，请换源");
+      }
+    });
+  } else {
+    hideLoading();
+    showToast("播放失败，请换源");
+  }
+}';
   html += 'function tryDirect(url,video,cb){var fail=false,t=setTimeout(function(){if(!fail){fail=true;cb(false);}},8000);var hs=false;try{hs=(typeof Hls!=="undefined"&&Hls.isSupported());}catch(e){}if(hs){hls=new Hls({maxBufferLength:30,enableWorker:true,lowLatencyMode:false});hls.loadSource(url);hls.attachMedia(video);hls.on(Hls.Events.MANIFEST_PARSED,function(){clearTimeout(t);if(!fail){fail=true;video.play().then(function(){tryResume();}).catch(function(){showControls();showToast("点击播放按钮开始",2000);});cb(true);}});hls.on(Hls.Events.ERROR,function(e,d){if(d.fatal&&!fail){clearTimeout(t);fail=true;if(hls){hls.destroy();hls=null;}cb(false);}else if(d.fatal&&fail){if(hls){try{hls.destroy();}catch(e2){}hls=null;}}});}else if(video.canPlayType("application/vnd.apple.mpegurl")){video.src=url;video.muted=false;video.play().then(function(){clearTimeout(t);if(!fail){fail=true;tryResume();cb(true);}}).catch(function(){clearTimeout(t);if(!fail){fail=true;showControls();cb(true);}});}else{clearTimeout(t);cb(false);}}';
   html += 'function tryProxy(pu,video,idx,cb){var fail=false,t=setTimeout(function(){if(!fail){fail=true;cb(false);}},12000);var hs=false;try{hs=(typeof Hls!=="undefined"&&Hls.isSupported());}catch(e){}if(hs){hls=new Hls({maxBufferLength:30,enableWorker:true,lowLatencyMode:false,xhrSetup:function(xhr){if(idx===0)xhr.withCredentials=false;}});hls.loadSource(pu);hls.attachMedia(video);hls.on(Hls.Events.MANIFEST_PARSED,function(){clearTimeout(t);if(!fail){fail=true;workingProxyIdx=idx;video.play().then(function(){tryResume();}).catch(function(){showControls();showToast("点击播放按钮开始",2000);});cb(true);}});hls.on(Hls.Events.ERROR,function(e,d){if(d.fatal&&!fail){clearTimeout(t);fail=true;if(hls){hls.destroy();hls=null;}cb(false);}else if(d.fatal&&fail){if(hls){try{hls.destroy();}catch(e2){}hls=null;}}});}else if(video.canPlayType("application/vnd.apple.mpegurl")){video.src=pu;video.play().then(function(){clearTimeout(t);if(!fail){fail=true;tryResume();cb(true);}}).catch(function(){clearTimeout(t);if(!fail){fail=true;showControls();cb(true);}});}else{clearTimeout(t);cb(false);}}';
 
