@@ -173,11 +173,13 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 </div>
 <div class="form-group">
 <label>CORS代理（搜索/详情用）</label>
+<!-- 🐾修复：移除失效的 cors.sh，改用 allorigins / codetabs / corsproxy.io / isomorphic-git -->
 <select class="form-input" id="proxySelect" onchange="changeProxy()">
 <option value="auto">自动选择（推荐）</option>
-<option value="0">cors.sh</option>
-<option value="1">allorigins</option>
-<option value="2">codetabs</option>
+<option value="0">allorigins</option>
+<option value="1">codetabs</option>
+<option value="2">corsproxy.io</option>
+<option value="3">cors.isomorphic-git</option>
 <option value="direct">直连（不代理）</option>
 </select>
 <p style="font-size:11px;color:var(--text-dim);margin-top:4px">搜索无结果时试试切换代理</p>
@@ -264,10 +266,12 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 <script>
 // ========== CORS 代理配置 ==========
+// 🐾修复：cors.sh 已失效移除；优先直连（部分CMS已开CORS），失败再依次代理
 var CORS_PROXIES = [
-  function(url) { return 'https://proxy.cors.sh/' + url; },
   function(url) { return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url); },
-  function(url) { return 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url); }
+  function(url) { return 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url); },
+  function(url) { return 'https://corsproxy.io/?url=' + encodeURIComponent(url); },
+  function(url) { return 'https://cors.isomorphic-git.org/' + url; }
 ];
 var proxyMode = 'auto';
 var workingProxyIdx = 0;
@@ -286,59 +290,88 @@ function _fetchCompat(url, timeout, cb, errCb) {
     if (ctrl) { try { ctrl.abort(); } catch(e) {} }
     _err(new Error('timeout'));
   }, timeout);
-  var opts = {};
+  var opts = { cache: 'no-store', credentials: 'omit' };
   if (ctrl) opts.signal = ctrl.signal;
-  fetch(url, opts).then(function(r) {
-    if (!r.ok) throw new Error('HTTP ' + r.status);
-    return r.text();
-  }).then(function(text) {
-    clearTimeout(t);
-    _cb(text);
-  }).catch(function(e) {
+  try {
+    fetch(url, opts).then(function(r) {
+      if (!r.ok) throw new Error('HTTP ' + r.status);
+      return r.text();
+    }).then(function(text) {
+      clearTimeout(t);
+      _cb(text);
+    }).catch(function(e) {
+      clearTimeout(t);
+      _err(e);
+    });
+  } catch(e) {
     clearTimeout(t);
     _err(e);
-  });
-}
-
-function cleanResponseText(text) {
-  var c = text;
-  var si = c.indexOf('<script'); if (si > 0) c = c.substring(0, si);
-  si = c.indexOf('<html'); if (si >= 0) c = c.substring(0, si);
-  return c.trim();
-}
-function safeParseJSON(text) {
-  var c = cleanResponseText(text);
-  try { return JSON.parse(c); } catch(e1) {
-    var lb = c.lastIndexOf('}'); if (lb > 0) { try { return JSON.parse(c.substring(0, lb + 1)); } catch(e2) {} }
-    throw new Error('JSON parse failed');
   }
 }
-function fetchJson(url, cb, errCb, timeout) {
-  timeout = timeout || 12000;
-  if (proxyMode === 'direct') { fetchDirect(url, cb, errCb, timeout); return; }
-  if (proxyMode === 'auto') fetchWithAutoProxy(url, 0, cb, errCb, timeout);
-  else fetchSingle(CORS_PROXIES[parseInt(proxyMode)](url), cb, errCb, timeout);
+
+// 🐾修复：保守清洗。剥 BOM → 直接解析 → 处理 allorigins 包装 → 首尾大括号截取
+function safeParseJSON(text) {
+  if (text === null || text === undefined) throw new Error('empty response');
+  var c = String(text).replace(/^\uFEFF/, '').trim();
+  if (!c) throw new Error('empty response');
+  try { return JSON.parse(c); } catch(e1) {}
+  try {
+    var wrap = JSON.parse(c);
+    if (wrap && typeof wrap.contents === 'string') return safeParseJSON(wrap.contents);
+  } catch(e2) {}
+  var s = c.indexOf('{');
+  var e = c.lastIndexOf('}');
+  if (s >= 0 && e > s) {
+    try { return JSON.parse(c.substring(s, e + 1)); } catch(e3) {}
+  }
+  throw new Error('JSON parse failed');
 }
+
+// 🐾修复：统一入口
+function fetchJson(url, cb, errCb, timeout) {
+  timeout = timeout || 20000;
+  if (proxyMode === 'direct') { fetchDirect(url, cb, errCb, timeout); return; }
+  if (proxyMode === 'auto') { fetchAuto(url, cb, errCb, timeout); return; }
+  var idx = parseInt(proxyMode, 10);
+  if (isNaN(idx) || idx < 0 || idx >= CORS_PROXIES.length) { fetchDirect(url, cb, errCb, timeout); return; }
+  fetchSingle(CORS_PROXIES[idx](url), cb, errCb, timeout);
+}
+
+// 🐾修复：auto 模式先试直连（短超时），失败再依次代理
+function fetchAuto(url, cb, errCb, timeout) {
+  fetchDirect(url, cb, function() {
+    fetchWithAutoProxy(url, 0, cb, errCb, timeout);
+  }, Math.min(timeout, 6000));
+}
+
 function fetchWithAutoProxy(url, idx, cb, errCb, timeout) {
-  if (idx >= CORS_PROXIES.length) { fetchDirect(url, cb, errCb, timeout); return; }
+  if (idx >= CORS_PROXIES.length) { errCb(new Error('all proxies failed')); return; }
   var pu = CORS_PROXIES[idx](url);
   _fetchCompat(pu, timeout, function(text) {
-    try { workingProxyIdx = idx; cb(safeParseJSON(text)); }
-    catch(e) { fetchWithAutoProxy(url, idx + 1, cb, errCb, timeout); }
+    try {
+      var data = safeParseJSON(text);
+      workingProxyIdx = idx;
+      cb(data);
+    } catch(e) {
+      fetchWithAutoProxy(url, idx + 1, cb, errCb, timeout);
+    }
   }, function() {
     fetchWithAutoProxy(url, idx + 1, cb, errCb, timeout);
   });
 }
+
 function fetchSingle(pu, cb, errCb, timeout) {
   _fetchCompat(pu, timeout, function(text) {
     try { cb(safeParseJSON(text)); } catch(e) { errCb(new Error('parse fail')); }
   }, function(e) { errCb(e); });
 }
+
 function fetchDirect(url, cb, errCb, timeout) {
   _fetchCompat(url, timeout, function(text) {
     try { cb(safeParseJSON(text)); } catch(e) { errCb(new Error('parse fail')); }
   }, function(e) { errCb(e); });
 }
+
 function changeProxy() {
   var sel = document.getElementById('proxySelect');
   proxyMode = sel.value;
@@ -347,7 +380,7 @@ function changeProxy() {
   showToast('代理已切换：' + sel.options[sel.selectedIndex].text);
 }
 
-// ========== 持久化存储（浏览器环境，直接使用 localStorage） ==========
+// ========== 持久化存储 ==========
 function _lsGet(key) {
   try { return localStorage.getItem(key); } catch(e) { return null; }
 }
@@ -380,12 +413,12 @@ var IDB = {
       }
     }, 3000);
     var idb = window.indexedDB || window.webkitIndexedDB || window.mozIndexedDB || window.msIndexedDB;
-    if (!idb) { 
+    if (!idb) {
       clearTimeout(_idbTimer);
       this._initCallbacks.forEach(function(c) { c(false); });
       this._initCallbacks = [];
-      if (cb) cb(false); 
-      return; 
+      if (cb) cb(false);
+      return;
     }
     try {
       var req = idb.open('vplayer_db', 1);
@@ -545,7 +578,7 @@ function getHomeSourceUrl() {
       if (sources[i].url === State.settings.homeSourceUrl) return sources[i].url;
     }
   }
-  return sources[0] ? sources[0].url : 'https://caiji.dyttzyapi.com/api.php/provide/vod';
+  return sources[0] ? sources[0].url : 'https://cj.ffzyapi.com/api.php/provide/vod';
 }
 
 // ========== 视图栈 ==========
@@ -724,7 +757,6 @@ function resetAllViews() {
   updateBackButton();
 }
 
-// 浏览器返回：由 popstate/hashchange 统一处理（见上方 _doBack）；页头返回按钮直接调用 goBack()
 (function() { var sel = document.getElementById('proxySelect'); if (sel) sel.value = proxyMode; })();
 
 function showToast(msg, duration) {
@@ -768,7 +800,7 @@ function loadHomeTypes() {
     } else {
       document.getElementById('homeList').innerHTML = '<div class="empty"><div class="icon">😢</div><p>加载失败，请检查网络或代理</p><button class="btn btn-sm" style="margin-top:12px" onclick="_homeRetryCount=0;loadHomeTypes()">重试</button></div>';
     }
-  }, 10000);
+  }, 20000);
 }
 
 function renderTypeTabs() {
@@ -850,7 +882,7 @@ function loadHomeVideos(typeId, page, isRefresh) {
     } else {
       removeLoadMoreIndicator();
     }
-  }, 12000);
+  }, 20000);
 }
 
 function removeLoadMoreIndicator() {
@@ -1018,7 +1050,7 @@ function showDetail(item) {
   var found = false, completed = 0, total = sources.length;
   var fallbackTimer = setTimeout(function() {
     if (!found) { found = true; openDetailFrame(item); }
-  }, 12000);
+  }, 20000);
   var preferredUrl = State.currentSourceUrl || getHomeSourceUrl();
   var orderedSources = sources.slice().sort(function(a, b) {
     if (a.url === preferredUrl) return -1;
@@ -1189,7 +1221,7 @@ window.addEventListener('message', function(e) {
   }
 });
 
-// ========== 播放器核心（修复版，整合弹幕） ==========
+// ========== 播放器核心 ==========
 function openPlayerFrame(detail, epIdx, resumeTime) {
   State.currentDetail = detail;
   State.currentPlayFrom = (detail.vod_play_from || '').split('$$$');
@@ -1211,16 +1243,13 @@ function openPlayerFrame(detail, epIdx, resumeTime) {
   var html;
   try {
     html = generatePlayerHtml(detail, savedEp, savedTime);
-    console.log('[PLAYER] openPlayerFrame: html length=' + (html ? html.length : 'null') + ', epIdx=' + savedEp);
   } catch(e) {
-    console.error('[PLAYER] generatePlayerHtml error:', e.message, e.stack);
     html = '<html><body style="background:#000;color:#fff;font-size:16px;padding:20px"><h3>播放器生成失败</h3><p>错误: ' + e.message + '</p><button onclick="parent.closePlayer()" style="padding:10px 20px;background:#0071e3;color:#fff;border:none;border-radius:8px;margin-top:10px">返回</button></body></html>';
   }
   var iframe = document.getElementById('playerIframe');
   if (iframe._blobUrl) { URL.revokeObjectURL(iframe._blobUrl); iframe._blobUrl = null; }
   iframe.removeAttribute('src');
   iframe.srcdoc = html;
-  console.log('[PLAYER] srcdoc set, length=' + (html ? html.length : 0));
 }
 
 function closePlayerFrame() {
@@ -1238,7 +1267,7 @@ function closePlayerFrame() {
 function closePlayer() { closeViewByButton('player'); }
 function closeDetail() { closeViewByButton('detail'); }
 
-// ========== 生成播放器HTML（集成弹幕功能） ==========
+// ========== 生成播放器HTML ==========
 function generatePlayerHtml(detail, epIdx, resumeTime) {
   resumeTime = resumeTime || 0;
   var dataStr = JSON.stringify(detail).replace(/</g, '\\u003c').replace(/<\/script>/g, '<\\/script>');
@@ -1374,7 +1403,6 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += '.sleep-opt.active{background:#0071e3;border-color:#0071e3;color:#fff}';
   html += '</style></head><body>';
 
-  // 播放器结构（移除 tap-layer/gesture 独立层，统一在 video-wrap 处理触摸）
   html += '<div class="video-wrap" id="videoWrap">';
   html += '<video id="videoPlayer" playsinline webkit-playsinline x5-playsinline preload="auto"></video>';
   html += '<div class="player-loading" id="playerLoading"><div class="loading-spinner"></div></div>';
@@ -1454,9 +1482,7 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += '</div>';
   html += '</div>';
 
-  // ===== 播放器 JavaScript（集成弹幕 + 单事件源手势） =====
   html += '<script>';
-  html += 'console.log("[PLAYER] script start");';
   html += 'var detailData = ' + dataStr + ';';
   html += 'var playFromArr = ' + JSON.stringify(playFrom) + ';';
   html += 'var playUrlArr = ' + JSON.stringify(playUrl) + ';';
@@ -1468,7 +1494,8 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'var dmState = {enabled:true, opacity:0.8, fontSize:20, area:0, color:"#ffffff", delay:0, speed:120, comments:[], allComments:[], fetchedExternal:false};';
   html += 'try{var savedDm=JSON.parse(localStorage.getItem("vp_danmaku_settings")||"{}");if(savedDm.opacity)dmState.opacity=savedDm.opacity;if(savedDm.fontSize)dmState.fontSize=savedDm.fontSize;if(savedDm.area!==undefined)dmState.area=savedDm.area;if(savedDm.color)dmState.color=savedDm.color;if(savedDm.delay!==undefined)dmState.delay=savedDm.delay;if(savedDm.speed)dmState.speed=savedDm.speed;if(savedDm.enabled!==undefined)dmState.enabled=savedDm.enabled;}catch(e){}';
   html += 'try{var ps=JSON.parse(localStorage.getItem("vp_player_settings")||"{}");if(ps.speed)pState.speed=ps.speed;if(ps.isAutoPlay!==undefined)pState.isAutoPlay=ps.isAutoPlay;if(ps.aspectRatio)pState.aspectRatio=ps.aspectRatio;}catch(e){}';
-  html += 'var CORS_PROXIES = [function(u){return "https://proxy.cors.sh/"+u},function(u){return "https://api.allorigins.win/raw?url="+encodeURIComponent(u)},function(u){return "https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u)}];';
+  // 🐾修复：播放器 iframe 里的代理列表也换掉（去掉 cors.sh）
+  html += 'var CORS_PROXIES = [function(u){return "https://api.allorigins.win/raw?url="+encodeURIComponent(u)},function(u){return "https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u)},function(u){return "https://corsproxy.io/?url="+encodeURIComponent(u)}];';
   html += 'var workingProxyIdx = 0;';
   html += 'function el(id){return document.getElementById(id);}';
   html += 'function showToast(msg,dur){try{parent.showToast(msg,dur||2000);}catch(e){}}';
@@ -1477,7 +1504,6 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'function showLoading(){el("playerLoading").classList.add("show");}';
   html += 'function hideLoading(){el("playerLoading").classList.remove("show");}';
 
-  // 解析集数（增强）
   html += 'function parseEpisodes(idx){';
   html += '  var eps = [];';
   html += '  var raw = playUrlArr[idx];';
@@ -1504,7 +1530,6 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += '  return eps;';
   html += '}';
 
-  // 播放指定集（优化）
   html += 'function playEpisode(idx,autoResume){';
   html += '  var ep = episodes[idx];';
   html += '  if (!ep) {';
@@ -1533,16 +1558,13 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += '  else{video.src=url;video.muted=false;video.play().then(function(){tryResume();}).catch(function(e){showToast("直连失败，尝试代理",2000);playM3u8(url,video,0);});}';
   html += '  try{parent.addHistory(detailData,ep.name,idx);}catch(e){}';
   html += '  updateEpPanel(); pState.lastSave=0;';
-  html += '  /* 切集时重置弹幕并重新获取 */';
   html += '  dmState.fetchedExternal=false;dmState.comments=[];dmState.allComments=[];rebuildDanmaku([]);updateDanmakuCount();var dmBtn=el("dmFetchBtn");var dmStatus=el("dmFetchStatus");if(dmBtn){dmBtn.textContent="🔍 匹配弹幕";dmBtn.classList.remove("loading");dmBtn.style.display="";}if(dmStatus){dmStatus.textContent="";}if(dmState.enabled)tryFetchDanmaku();';
   html += '}';
 
-  // M3U8播放函数
   html += 'function playM3u8(url,video,attempt){if(typeof Hls==="undefined"){video.src=url;video.muted=false;video.play().then(function(){tryResume();}).catch(function(){hideLoading();showToast("不支持此视频格式");});return;}if(attempt===0)tryDirect(url,video,function(ok){if(!ok){showToast("直连失败，切换代理中...");playM3u8(url,video,1);}});else if(attempt<=CORS_PROXIES.length)tryProxy(CORS_PROXIES[attempt-1](url),video,attempt-1,function(ok){if(!ok&&attempt<CORS_PROXIES.length)playM3u8(url,video,attempt+1);else if(!ok){hideLoading();showToast("所有代理均播放失败，请换源");}});else{hideLoading();showToast("播放失败，请换源");}}';
   html += 'function tryDirect(url,video,cb){var fail=false,t=setTimeout(function(){if(!fail){fail=true;cb(false);}},8000);var hs=false;try{hs=(typeof Hls!=="undefined"&&Hls.isSupported());}catch(e){}if(hs){hls=new Hls({maxBufferLength:30,enableWorker:true,lowLatencyMode:false});hls.loadSource(url);hls.attachMedia(video);hls.on(Hls.Events.MANIFEST_PARSED,function(){clearTimeout(t);if(!fail){fail=true;video.play().then(function(){tryResume();}).catch(function(){showControls();showToast("点击播放按钮开始",2000);});cb(true);}});hls.on(Hls.Events.ERROR,function(e,d){if(d.fatal&&!fail){clearTimeout(t);fail=true;if(hls){hls.destroy();hls=null;}cb(false);}else if(d.fatal&&fail){if(hls){try{hls.destroy();}catch(e2){}hls=null;}}});}else if(video.canPlayType("application/vnd.apple.mpegurl")){video.src=url;video.muted=false;video.play().then(function(){clearTimeout(t);if(!fail){fail=true;tryResume();cb(true);}}).catch(function(){clearTimeout(t);if(!fail){fail=true;showControls();cb(true);}});}else{clearTimeout(t);cb(false);}}';
   html += 'function tryProxy(pu,video,idx,cb){var fail=false,t=setTimeout(function(){if(!fail){fail=true;cb(false);}},12000);var hs=false;try{hs=(typeof Hls!=="undefined"&&Hls.isSupported());}catch(e){}if(hs){hls=new Hls({maxBufferLength:30,enableWorker:true,lowLatencyMode:false,xhrSetup:function(xhr){if(idx===0)xhr.withCredentials=false;}});hls.loadSource(pu);hls.attachMedia(video);hls.on(Hls.Events.MANIFEST_PARSED,function(){clearTimeout(t);if(!fail){fail=true;workingProxyIdx=idx;video.play().then(function(){tryResume();}).catch(function(){showControls();showToast("点击播放按钮开始",2000);});cb(true);}});hls.on(Hls.Events.ERROR,function(e,d){if(d.fatal&&!fail){clearTimeout(t);fail=true;if(hls){hls.destroy();hls=null;}cb(false);}else if(d.fatal&&fail){if(hls){try{hls.destroy();}catch(e2){}hls=null;}}});}else if(video.canPlayType("application/vnd.apple.mpegurl")){video.src=pu;video.play().then(function(){clearTimeout(t);if(!fail){fail=true;tryResume();cb(true);}}).catch(function(){clearTimeout(t);if(!fail){fail=true;showControls();cb(true);}});}else{clearTimeout(t);cb(false);}}';
 
-  // 进度恢复 / 跳过标记
   html += 'function tryResume(){var v=el("videoPlayer");if(v._resumeTime>0){var t=v._resumeTime;v._resumeTime=0;setTimeout(function(){if(v.duration&&isFinite(v.duration)&&v.duration>t){v.currentTime=t;showToast("已恢复上次播放进度",1500);}},500);}}';
   html += 'function getMarkerKey(){return"vp_skip_"+detailData.vod_id;}';
   html += 'function loadSkipMarkers(){try{var data=JSON.parse(parent._lsGet(getMarkerKey())||"{}");pState.skipIntro=data.skipIntro||data.introEnd||0;pState.skipOutro=data.skipOutro||data.outroStart||0;}catch(e){pState.skipIntro=0;pState.skipOutro=0;}updateSkipMarks();}';
@@ -1553,27 +1575,22 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'function clearOutroMark(){if(pState.skipOutro<=0){showToast("未设置片尾标记");return;}pState.skipOutro=0;saveSkipMarkers();showToast("已取消片尾标记",1500);el("markOutroBtn").classList.remove("has-marker");}';
   html += 'function updateSkipMarks(){var v=el("videoPlayer");if(pState.skipIntro>0&&v.duration&&isFinite(v.duration)){var ip=(pState.skipIntro/v.duration)*100;el("skipIntroMark").style.display="";el("skipIntroMark").style.width=ip+"%";el("markIntroBtn").classList.add("has-marker");}else{el("skipIntroMark").style.display="none";el("markIntroBtn").classList.remove("has-marker");}if(pState.skipOutro>0&&v.duration&&isFinite(v.duration)){var op=((v.duration-pState.skipOutro)/v.duration)*100;el("skipOutroMark").style.display="";el("skipOutroMark").style.width=op+"%";el("markOutroBtn").classList.add("has-marker");}else{el("skipOutroMark").style.display="none";el("markOutroBtn").classList.remove("has-marker");}}';
 
-  // 倍速（增加 3.0x）
   html += 'var speeds=[0.5,0.75,1.0,1.25,1.5,2.0,3.0];function toggleSpeedPanel(){var sp=el("speedPanel");if(sp.classList.contains("show")){sp.classList.remove("show");return;}var cur=el("videoPlayer").playbackRate,h="";speeds.forEach(function(s){h+=\'<div class="speed-item\'+(Math.abs(s-cur)<0.01?" active":"")+\'" onclick="setSpeed(\'+s+\')">\'+s.toFixed(2)+\'x</div>\';});sp.innerHTML=h;sp.classList.add("show");}';
   html += 'function setSpeed(s){pState.speed=s;el("videoPlayer").playbackRate=s;el("speedLabel").textContent=s.toFixed(1)+"x";el("speedPanel").classList.remove("show");savePlayerSettings();showToast("倍速： "+s.toFixed(2)+"x",1000);}';
 
-  // 画面比例切换
   html += 'var ASPECT_RATIOS=["contain","cover","fill","16:9","4:3"];var ASPECT_LABELS={"contain":"默认","cover":"铺满","fill":"拉伸","16:9":"16:9","4:3":"4:3"};';
   html += 'function getAspectLabel(){return ASPECT_LABELS[pState.aspectRatio]||"默认";}';
   html += 'function cycleAspectRatio(){var idx=ASPECT_RATIOS.indexOf(pState.aspectRatio);idx=(idx+1)%ASPECT_RATIOS.length;pState.aspectRatio=ASPECT_RATIOS[idx];applyAspectRatio();savePlayerSettings();showToast("画面比例: "+getAspectLabel());}';
   html += 'function applyAspectRatio(){var v=el("videoPlayer");v.style.objectFit=pState.aspectRatio==="fill"?"fill":pState.aspectRatio==="cover"?"cover":"contain";if(pState.aspectRatio==="16:9"){v.style.objectFit="contain";v.style.aspectRatio="16/9";}else if(pState.aspectRatio==="4:3"){v.style.objectFit="contain";v.style.aspectRatio="4/3";}else{v.style.aspectRatio="auto";}}';
 
-  // 睡眠定时（15/30/45/60分钟）
   html += 'function handleSleepTimer(mins){if(pState.sleepInterval){clearInterval(pState.sleepInterval);pState.sleepInterval=null;pState.sleepRemaining=0;el("sleepIndicator").classList.remove("show");if(el("settingsPanel").classList.contains("show"))renderSettings();showToast("睡眠定时已取消");return;}if(!mins)return;pState.sleepRemaining=mins*60;el("sleepIndicator").classList.add("show");updateSleepDisplay();pState.sleepInterval=setInterval(function(){pState.sleepRemaining--;if(pState.sleepRemaining<=0){el("videoPlayer").pause();clearInterval(pState.sleepInterval);pState.sleepInterval=null;el("sleepIndicator").classList.remove("show");if(el("settingsPanel").classList.contains("show"))renderSettings();showToast("⏰ 睡眠定时结束，已暂停播放");}else{updateSleepDisplay();}},1000);showToast("⏰ "+mins+"分钟后暂停");if(el("settingsPanel").classList.contains("show"))renderSettings();}';
   html += 'function updateSleepDisplay(){var m=Math.floor(pState.sleepRemaining/60),s=pState.sleepRemaining%60;el("sleepIndicator").textContent="⏰ "+(m<10?"0":"")+m+":"+(s<10?"0":"")+s;}';
 
-  // 进度保存
   html += 'function getProgressForEp(epIdx){try{return parent.getProgress(detailData.vod_id||detailData.vod_name,epIdx);}catch(e){return null;}}';
   html += 'function saveCurrentProgress(){var v=el("videoPlayer");if(!v.duration||!isFinite(v.duration)||v.currentTime<1)return;try{parent.saveProgress(detailData,currentEp,episodes[currentEp]?episodes[currentEp].name:"",v.currentTime,v.duration,currentTab,playFromArr);}catch(e){}}';
   html += 'function savePlayerSettings(){try{localStorage.setItem("vp_player_settings",JSON.stringify({speed:pState.speed,isAutoPlay:pState.isAutoPlay,aspectRatio:pState.aspectRatio}));}catch(e){}}';
   html += 'function toggleAutoPlay(){pState.isAutoPlay=!pState.isAutoPlay;savePlayerSettings();renderSettings();}';
 
-  // 面板
   html += 'function isPanelOpen(){return el("epPanel").classList.contains("show")||el("routePanel").classList.contains("show")||el("settingsPanel").classList.contains("show")||el("dmSettingsPanel").classList.contains("show")||el("speedPanel").classList.contains("show");}';
   html += 'function closePanels(){el("epPanel").classList.remove("show");el("routePanel").classList.remove("show");el("settingsPanel").classList.remove("show");el("dmSettingsPanel").classList.remove("show");el("speedPanel").classList.remove("show");el("panelBackdrop").classList.remove("show");}';
   html += 'function toggleEpPanel(){if(el("epPanel").classList.contains("show")){closePanels();return;}closePanels();updateEpPanel();el("epPanel").classList.add("show");el("panelBackdrop").classList.add("show");}';
@@ -1584,12 +1601,11 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'function toggleSettingsPanel(){if(el("settingsPanel").classList.contains("show")){closePanels();return;}closePanels();renderSettings();el("settingsPanel").classList.add("show");el("panelBackdrop").classList.add("show");}';
   html += 'function toggleDmSettingsPanel(){if(el("dmSettingsPanel").classList.contains("show")){closePanels();return;}closePanels();renderDmSettings();el("dmSettingsPanel").classList.add("show");el("panelBackdrop").classList.add("show");}';
   html += 'function renderSettings(){var h="";h+=\'<div class="pp-route-item" style="display:flex;justify-content:space-between;align-items:center"><span>自动连播</span><button class="dm-area-btn \'+(pState.isAutoPlay?"active":"")+\'" onclick="toggleAutoPlay()">\'+(pState.isAutoPlay?"开":"关")+\'</button></div>\';h+=\'<div class="pp-route-item" style="display:flex;justify-content:space-between;align-items:center"><span>画面比例</span><span style="color:#0071e3">\'+getAspectLabel()+\'</span></div>\';h+=\'<div class="pp-route-item" style="display:flex;justify-content:space-between;align-items:center"><span>播放速度</span><span style="color:#0071e3">\'+pState.speed.toFixed(2)+\'x</span></div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:flex-start;gap:6px"><span>睡眠定时</span><div style="display:flex;gap:6px;flex-wrap:wrap;align-items:center">\';if(pState.sleepInterval){var sm=Math.floor(pState.sleepRemaining/60),ss=pState.sleepRemaining%60;h+=\'<span style="color:#ffd93d;font-size:12px">\\u23f0 剩余 \'+(sm<10?"0":"")+sm+\':\'+(ss<10?"0":"")+ss+\'</span>\';h+=\'<button class="dm-area-btn active" onclick="handleSleepTimer()">取消定时</button>\';}else{[15,30,45,60].forEach(function(m){h+=\'<button class="dm-area-btn" onclick="handleSleepTimer(\'+m+\')">\'+m+\'分钟</button>\';});}h+=\'</div></div>\';el("settingsContent").innerHTML=h;}';
-  html += 'function renderDmSettings(){var h="";var _ct=detailData.vod_name||"";h+=\'<div class="pp-route-item" style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px"><span style="font-size:15px">弹幕开关</span><button class="dm-area-btn \'+(dmState.enabled?"active":"")+\'" onclick="toggleDanmaku();renderDmSettings()">\'+(dmState.enabled?"开":"关")+\'</button></div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px"><div style="display:flex;justify-content:space-between;width:100%;align-items:center"><span style="font-size:14px">不透明度</span><span style="color:#0071e3;min-width:40px;text-align:right" id="dmOpacityVal">\'+Math.round(dmState.opacity*100)+\'%</span></div>\';h+=\'<input type="range" id="dmOpacity" min="10" max="100" value="\'+Math.round(dmState.opacity*100)+\'" oninput="updateDanmakuOpacity()" style="width:100%;accent-color:#0071e3;height:6px">\';h+=\'</div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px"><div style="display:flex;justify-content:space-between;width:100%;align-items:center"><span style="font-size:14px">字体大小</span><span style="color:#0071e3;min-width:40px;text-align:right" id="dmFontSizeVal">\'+dmState.fontSize+\'px</span></div>\';h+=\'<input type="range" id="dmFontSize" min="14" max="48" value="\'+dmState.fontSize+\'" oninput="updateDanmakuFontSize()" style="width:100%;accent-color:#0071e3;height:6px">\';h+=\'</div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px"><div style="display:flex;justify-content:space-between;width:100%;align-items:center"><span style="font-size:14px">显示区域</span></div>\';h+=\'<div style="display:flex;gap:6px;justify-content:space-between">\';h+=\'<button class="dm-area-btn \'+(dmState.area===0?"active":"")+\'" data-area="0" onclick="setDanmakuArea(this,0);renderDmSettings()" style="flex:1">1/4</button>\';h+=\'<button class="dm-area-btn \'+(dmState.area===1?"active":"")+\'" data-area="1" onclick="setDanmakuArea(this,1);renderDmSettings()" style="flex:1">1/3</button>\';h+=\'<button class="dm-area-btn \'+(dmState.area===2?"active":"")+\'" data-area="2" onclick="setDanmakuArea(this,2);renderDmSettings()" style="flex:1">2/3</button>\';h+=\'<button class="dm-area-btn \'+(dmState.area===3?"active":"")+\'" data-area="3" onclick="setDanmakuArea(this,3);renderDmSettings()" style="flex:1">全屏</button>\';h+=\'</div></div>\';h+=\'<div class="pp-route-item" style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px"><span style="font-size:14px">弹幕时延</span><div style="display:flex;align-items:center;gap:8px"><button class="dm-delay-btn" onclick="adjustDelay(-0.5);renderDmSettings()" style="background:rgba(255,255,255,0.15);border:none;color:#fff;width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:18px">-</button><span style="color:#0071e3;min-width:44px;text-align:center;font-size:14px">\'+(dmState.delay>=0?"+":"")+dmState.delay.toFixed(1)+\'s</span><button class="dm-delay-btn" onclick="adjustDelay(0.5);renderDmSettings()" style="background:rgba(255,255,255,0.15);border:none;color:#fff;width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:18px">+</button></div></div>\';h+=\'<div class="pp-route-item" style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px"><span style="font-size:14px">弹幕数量</span><span style="color:#0071e3;font-size:14px">\'+dmState.comments.length+\'</span></div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px"><span style="font-size:14px">自定义弹幕API</span>\';h+=\'<div style="display:flex;gap:8px;width:100%;align-items:center"><input type="text" id="dmCustomApiInput" placeholder="留空用默认源" value="\'+(DM_CUSTOM_API||"")+\'" style="flex:1;height:34px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:8px;color:#fff;padding:0 10px;font-size:12px;outline:none"><button onclick="saveCustomDmApi()" style="background:#0071e3;border:none;color:#fff;padding:8px 14px;border-radius:8px;font-size:12px;cursor:pointer;white-space:nowrap">保存</button></div>\';h+=\'</div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px">\';h+=\'<button class="dm-fetch-btn" id="dmFetchBtn" onclick="fetchAlternativeDanmaku()" style="width:100%;background:#0071e3;border:none;color:#fff;padding:12px;border-radius:10px;font-size:14px;cursor:pointer">🔍 自动匹配</button>\';h+=\'<div class="dm-fetch-status" id="dmFetchStatus" style="font-size:12px;color:rgba(255,255,255,0.6);min-height:16px;text-align:center"></div>\';h+=\'</div>\';el("dmSettingsContent").innerHTML=h;}';
+  html += 'function renderDmSettings(){var h="";h+=\'<div class="pp-route-item" style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px"><span style="font-size:15px">弹幕开关</span><button class="dm-area-btn \'+(dmState.enabled?"active":"")+\'" onclick="toggleDanmaku();renderDmSettings()">\'+(dmState.enabled?"开":"关")+\'</button></div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px"><div style="display:flex;justify-content:space-between;width:100%;align-items:center"><span style="font-size:14px">不透明度</span><span style="color:#0071e3;min-width:40px;text-align:right" id="dmOpacityVal">\'+Math.round(dmState.opacity*100)+\'%</span></div>\';h+=\'<input type="range" id="dmOpacity" min="10" max="100" value="\'+Math.round(dmState.opacity*100)+\'" oninput="updateDanmakuOpacity()" style="width:100%;accent-color:#0071e3;height:6px">\';h+=\'</div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px"><div style="display:flex;justify-content:space-between;width:100%;align-items:center"><span style="font-size:14px">字体大小</span><span style="color:#0071e3;min-width:40px;text-align:right" id="dmFontSizeVal">\'+dmState.fontSize+\'px</span></div>\';h+=\'<input type="range" id="dmFontSize" min="14" max="48" value="\'+dmState.fontSize+\'" oninput="updateDanmakuFontSize()" style="width:100%;accent-color:#0071e3;height:6px">\';h+=\'</div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px"><div style="display:flex;justify-content:space-between;width:100%;align-items:center"><span style="font-size:14px">显示区域</span></div>\';h+=\'<div style="display:flex;gap:6px;justify-content:space-between">\';h+=\'<button class="dm-area-btn \'+(dmState.area===0?"active":"")+\'" data-area="0" onclick="setDanmakuArea(this,0);renderDmSettings()" style="flex:1">1/4</button>\';h+=\'<button class="dm-area-btn \'+(dmState.area===1?"active":"")+\'" data-area="1" onclick="setDanmakuArea(this,1);renderDmSettings()" style="flex:1">1/3</button>\';h+=\'<button class="dm-area-btn \'+(dmState.area===2?"active":"")+\'" data-area="2" onclick="setDanmakuArea(this,2);renderDmSettings()" style="flex:1">2/3</button>\';h+=\'<button class="dm-area-btn \'+(dmState.area===3?"active":"")+\'" data-area="3" onclick="setDanmakuArea(this,3);renderDmSettings()" style="flex:1">全屏</button>\';h+=\'</div></div>\';h+=\'<div class="pp-route-item" style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px"><span style="font-size:14px">弹幕时延</span><div style="display:flex;align-items:center;gap:8px"><button class="dm-delay-btn" onclick="adjustDelay(-0.5);renderDmSettings()" style="background:rgba(255,255,255,0.15);border:none;color:#fff;width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:18px">-</button><span style="color:#0071e3;min-width:44px;text-align:center;font-size:14px">\'+(dmState.delay>=0?"+":"")+dmState.delay.toFixed(1)+\'s</span><button class="dm-delay-btn" onclick="adjustDelay(0.5);renderDmSettings()" style="background:rgba(255,255,255,0.15);border:none;color:#fff;width:32px;height:32px;border-radius:8px;cursor:pointer;font-size:18px">+</button></div></div>\';h+=\'<div class="pp-route-item" style="display:flex;justify-content:space-between;align-items:center;padding:14px 16px"><span style="font-size:14px">弹幕数量</span><span style="color:#0071e3;font-size:14px">\'+dmState.comments.length+\'</span></div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px"><span style="font-size:14px">自定义弹幕API</span>\';h+=\'<div style="display:flex;gap:8px;width:100%;align-items:center"><input type="text" id="dmCustomApiInput" placeholder="留空用默认源" value="\'+(DM_CUSTOM_API||"")+\'" style="flex:1;height:34px;background:rgba(255,255,255,0.1);border:1px solid rgba(255,255,255,0.2);border-radius:8px;color:#fff;padding:0 10px;font-size:12px;outline:none"><button onclick="saveCustomDmApi()" style="background:#0071e3;border:none;color:#fff;padding:8px 14px;border-radius:8px;font-size:12px;cursor:pointer;white-space:nowrap">保存</button></div>\';h+=\'</div>\';h+=\'<div class="pp-route-item" style="flex-direction:column;align-items:stretch;gap:10px;padding:14px 16px">\';h+=\'<button class="dm-fetch-btn" id="dmFetchBtn" onclick="fetchAlternativeDanmaku()" style="width:100%;background:#0071e3;border:none;color:#fff;padding:12px;border-radius:10px;font-size:14px;cursor:pointer">🔍 自动匹配</button>\';h+=\'<div class="dm-fetch-status" id="dmFetchStatus" style="font-size:12px;color:rgba(255,255,255,0.6);min-height:16px;text-align:center"></div>\';h+=\'</div>\';el("dmSettingsContent").innerHTML=h;}';
   html += 'window._stopPlayer=function(){saveCurrentProgress();var v=el("videoPlayer");if(v){v.pause();v.src="";}if(hls){try{hls.destroy();}catch(e){}hls=null;}if(danmaku){try{danmaku.clear();danmaku.destroy();}catch(e){}danmaku=null;}if(pState.sleepInterval){clearInterval(pState.sleepInterval);pState.sleepInterval=null;}};';
   html += 'function playNext(){if(currentEp<episodes.length-1)playEpisode(currentEp+1);else showToast("已是最后一集");}';
   html += 'function playPrev(){if(currentEp>0)playEpisode(currentEp-1);else showToast("已是第一集");}';
 
-  // 朝向 / 全屏 / 锁定
   html += 'function isLandscape(){try{if(screen.orientation&&screen.orientation.type)return screen.orientation.type.indexOf("landscape")>=0;}catch(e){}return window.innerWidth>window.innerHeight;}';
   html += 'function updateOrientation(){applyAspectRatio();}';
   html += 'function onResize(){updateOrientation();if(danmaku)danmaku.resize();}';
@@ -1602,7 +1618,6 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'function toggleRotate(){var v=el("videoPlayer");if(!v)return;var angles=["0","90","270"];var cur=v.dataset.rotate||"0";var idx=angles.indexOf(cur);idx=(idx+1)%angles.length;var na=angles[idx];v.dataset.rotate=na;var wrap=el("videoWrap");var isWide=wrap.offsetWidth>wrap.offsetHeight;if(na==="0"){v.style.transform="";v.style.width="";v.style.height="";v.style.maxWidth="";v.style.maxHeight="";}else{v.style.transform="rotate("+na+"deg)";if(isWide){v.style.maxHeight=wrap.offsetWidth+"px";v.style.maxWidth=wrap.offsetHeight+"px";}}if(danmaku)setTimeout(function(){danmaku.resize();},100);showToast("画面旋转 "+na+"°",1000);}';
   html += 'function togglePip(){var v=el("videoPlayer");if(!v)return;if(document.pictureInPictureElement){document.exitPictureInPicture().catch(function(){});}else if(document.pictureInPictureEnabled&&v.requestPictureInPicture){v.requestPictureInPicture().catch(function(e){showToast("画中画不可用",1500);});}else{showToast("浏览器不支持画中画",1500);}}';
 
-  // 控制栏：非全屏时常驻显示，不自动隐藏
   html += 'function showControls(){if(pState.isLocked)return;pState.controlsVisible=true;el("topBar").classList.remove("hide");el("bottomBar").classList.remove("hide");el("centerPlay").classList.remove("hide");el("rightCluster").classList.remove("hide");startCtrlTimer();}';
   html += 'function hideControls(){if(pState.isLocked)return;if(!pState.isFullscreen)return;pState.controlsVisible=false;el("topBar").classList.add("hide");el("bottomBar").classList.add("hide");el("centerPlay").classList.add("hide");el("rightCluster").classList.add("hide");clearTimeout(pState.ctrlTimer);}';
   html += 'function toggleControls(){if(pState.isSeeking||pState.gestureMode)return;if(pState.controlsVisible)hideControls();else showControls();}';
@@ -1616,7 +1631,6 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'function updateBuf(){var v=el("videoPlayer");if(!v.duration||!isFinite(v.duration)||!v.buffered.length)return;var end=v.buffered.end(v.buffered.length-1);el("buffered").style.width=((end/v.duration)*100)+"%";}';
   html += 'function setupSeek(){var seek=el("seekBar"),video=el("videoPlayer");function getPct(x){var r=seek.getBoundingClientRect();return Math.max(0,Math.min(1,(x-r.left)/r.width));}function doSeek(x){if(!video.duration||!isFinite(video.duration))return;var p=getPct(x);video.currentTime=p*video.duration;el("played").style.width=(p*100)+"%";el("thumb").style.left=(p*100)+"%";el("curTime").textContent=fmtTime(p*video.duration);}seek.addEventListener("touchstart",function(e){e.preventDefault();e.stopPropagation();pState.isSeeking=true;doSeek(e.touches[0].clientX);},{passive:false});seek.addEventListener("touchmove",function(e){e.preventDefault();e.stopPropagation();if(pState.isSeeking)doSeek(e.touches[0].clientX);},{passive:false});seek.addEventListener("touchend",function(e){e.stopPropagation();pState.isSeeking=false;saveCurrentProgress();startCtrlTimer();});seek.addEventListener("mousedown",function(e){e.stopPropagation();pState.isSeeking=true;doSeek(e.clientX);});document.addEventListener("mousemove",function(e){if(pState.isSeeking)doSeek(e.clientX);});document.addEventListener("mouseup",function(){if(pState.isSeeking){saveCurrentProgress();}pState.isSeeking=false;});}';
 
-  // 手势：统一在 video-wrap 上处理，通过坐标判断手势区域（移除独立层）
   html += 'function setupEvents(){var wrap=el("videoWrap");var video=el("videoPlayer");var UISEL=".top-bar,.bottom-bar,.player-panel,.panel-backdrop,.speed-panel,.lock-overlay,.right-cluster,.center-ctrls,.sleep-indicator";wrap.addEventListener("touchstart",function(e){if(pState.isLocked)return;if(isPanelOpen()){pState.gestureMode=null;pState.gestureMoved=false;return;}if(e.touches.length>1)return;if(e.target.closest(UISEL))return;var touch=e.touches[0];pState.gestureStartX=touch.clientX;pState.gestureStartY=touch.clientY;pState.gestureStartTime=video.currentTime;pState.gestureMoved=false;pState.gestureMode=null;clearTimeout(pState.longPressTimer);pState.longPressTimer=setTimeout(function(){if(!pState.gestureMoved){pState.longPressing=true;if(!video.paused){video.playbackRate=2.0;showGestureToast("⚡ 2.0x 快放中");}}},600);},{passive:true});wrap.addEventListener("touchmove",function(e){if(pState.isLocked)return;if(isPanelOpen()){if(!e.target.closest(".pp-content"))e.preventDefault();pState.gestureMode=null;return;}if(e.touches.length>1)return;clearTimeout(pState.longPressTimer);if(e.target.closest(UISEL))return;if(pState.longPressing)return;var touch=e.touches[0];var dx=touch.clientX-pState.gestureStartX;var dy=pState.gestureStartY-touch.clientY;var absDx=Math.abs(dx),absDy=Math.abs(dy);if(!pState.gestureMode&&(absDx>10||absDy>10)){pState.gestureMoved=true;var w=window.innerWidth;var zone=pState.gestureStartX/w;if(absDx>absDy){pState.gestureMode="seek";}else{if(zone<0.33){pState.gestureMode="brightness";pState.gestureStartBrightness=pState.brightness;}else{pState.gestureMode="volume";pState.gestureStartVolume=video.volume||0;}}}if(pState.gestureMode==="seek"){e.preventDefault();var v=video;if(v.duration){var seekTo=Math.max(0,Math.min(v.duration,pState.gestureStartTime+(dx/w)*v.duration*0.5));v.currentTime=seekTo;showGestureToast("⏩ "+fmtTime(seekTo)+" / "+fmtTime(v.duration));}}else if(pState.gestureMode==="brightness"){e.preventDefault();var bri=Math.max(0.1,Math.min(1,pState.gestureStartBrightness+(dy/(window.innerHeight*2))));pState.brightness=bri;el("videoWrap").style.filter="brightness("+bri+")";showBVIndicator("☀️","亮度",Math.round(bri*100));}else if(pState.gestureMode==="volume"){e.preventDefault();var vol=Math.max(0,Math.min(1,pState.gestureStartVolume+(dy/(window.innerHeight*2))));video.volume=vol;showBVIndicator("🔊","音量",Math.round(vol*100));}},{passive:false});wrap.addEventListener("touchend",function(e){if(pState.isLocked){if(e.target.closest(".lock-overlay"))toggleLock();return;}if(e.target.closest(UISEL))return;clearTimeout(pState.longPressTimer);if(pState.longPressing){pState.longPressing=false;video.playbackRate=pState.speed;el("speedLabel").textContent=pState.speed.toFixed(1)+"x";hideGestureToast();return;}if(pState.gestureMode){hideBVIndicator();hideGestureToast();if(pState.gestureMode==="seek")saveCurrentProgress();pState.gestureMode=null;if(pState.gestureMoved){startCtrlTimer();return;}}if(isPanelOpen())return;var now=Date.now();var touch=e.changedTouches[0];var x=touch.clientX;var dt=now-pState.lastTap;if(dt<300){e.preventDefault();var w=window.innerWidth;if(x<w/3){video.currentTime=Math.max(0,video.currentTime-10);showGestureToast("⏪ -10s");}else if(x>w*2/3){video.currentTime=Math.min(video.duration||0,video.currentTime+10);showGestureToast("⏩ +10s");}else{togglePlay();}pState.lastTap=0;}else{pState.lastTap=now;pState.lastTapX=x;setTimeout(function(){if(pState.lastTap===now){pState.lastTap=0;if(isPanelOpen()){closePanels();return;}toggleControls();}},300);}},{passive:false});wrap.addEventListener("click",function(e){if(e.target.closest(UISEL+",.ctrl-btn,.tb-btn,.right-btn,.center-btn"))return;if("ontouchstart" in window)return;if(isPanelOpen()){closePanels();return;}toggleControls();});}';
   html += 'function showGestureToast(msg){var t=el("gestureToast");t.textContent=msg;t.classList.add("show");clearTimeout(t._timer);t._timer=setTimeout(function(){t.classList.remove("show");},600);}';
   html += 'function hideGestureToast(){var t=el("gestureToast");t.classList.remove("show");}';
@@ -1624,8 +1638,7 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'function showBVIndicator(icon,label,pct){var b=el("bvIndicator");b.querySelector(".icon").textContent=icon;el("bvLabel").textContent=label+" "+pct+"%";el("bvFill").style.width=pct+"%";b.classList.add("show");}';
   html += 'function hideBVIndicator(){el("bvIndicator").classList.remove("show");}';
 
-  // ========== 弹幕核心函数（destroy+重建 替代 emit 循环，避免叠加） ==========
-  html += 'function initDanmaku(){if(typeof Danmaku==="undefined"){console.log("Danmaku library not loaded");return;}danmaku=new Danmaku({container:el("danmakuContainer"),media:el("videoPlayer"),engine:"DOM",speed:dmState.speed,comments:[]});danmaku.speed=dmState.speed;applyDanmakuSettings();loadLocalDanmaku();var o=el("dmOpacity");if(o)o.value=Math.round(dmState.opacity*100);var f=el("dmFontSize");if(f)f.value=dmState.fontSize;document.querySelectorAll(".dm-area-btn").forEach(function(b){if(b.dataset.area)b.classList.toggle("active",parseInt(b.dataset.area)===dmState.area);});}';
+  html += 'function initDanmaku(){if(typeof Danmaku==="undefined"){return;}danmaku=new Danmaku({container:el("danmakuContainer"),media:el("videoPlayer"),engine:"DOM",speed:dmState.speed,comments:[]});danmaku.speed=dmState.speed;applyDanmakuSettings();loadLocalDanmaku();var o=el("dmOpacity");if(o)o.value=Math.round(dmState.opacity*100);var f=el("dmFontSize");if(f)f.value=dmState.fontSize;document.querySelectorAll(".dm-area-btn").forEach(function(b){if(b.dataset.area)b.classList.toggle("active",parseInt(b.dataset.area)===dmState.area);});}';
   html += 'function rebuildDanmaku(comments){if(danmaku){try{danmaku.clear();danmaku.destroy();}catch(e){}danmaku=null;}if(typeof Danmaku==="undefined")return;danmaku=new Danmaku({container:el("danmakuContainer"),media:el("videoPlayer"),engine:"DOM",speed:dmState.speed,comments:comments||[]});danmaku.speed=dmState.speed;applyDanmakuSettings();if(!dmState.enabled){danmaku.hide();}}';
   html += 'function toggleDanmaku(){dmState.enabled=!dmState.enabled;var t=el("danmakuToggleBtn"),c=el("danmakuContainer");if(dmState.enabled){t.classList.add("active");c.classList.remove("hide");if(danmaku){danmaku.show();}setTimeout(function(){filterAndEmitDanmaku();},50);if(!dmState.fetchedExternal)tryFetchDanmaku();}else{t.classList.remove("active");c.classList.add("hide");if(danmaku){danmaku.clear();danmaku.hide();}}saveDanmakuSettings();showControls();}';
   html += 'function updateDanmakuOpacity(){dmState.opacity=parseInt(el("dmOpacity").value)/100;applyDanmakuSettings();saveDanmakuSettings();var v=el("dmOpacityVal");if(v)v.textContent=Math.round(dmState.opacity*100)+"%";}';
@@ -1642,13 +1655,13 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'function filterAndEmitDanmaku(){dmState.comments=[];var timeBuckets={};var BUCKET_SIZE=1;var areaLimits={0:2,1:3,2:6,3:8};var MAX_PER_BUCKET=areaLimits[dmState.area]!==undefined?areaLimits[dmState.area]:6;var sorted=dmState.allComments.slice().sort(function(a,b){return(a.time||0)-(b.time||0);});var loadComments=[];sorted.forEach(function(c){var adjTime=(c.time||0)+dmState.delay;var bucket=Math.floor(adjTime/BUCKET_SIZE);var dmMode=c.mode||"rtl";if(!timeBuckets[bucket])timeBuckets[bucket]={rtl:0,top:0,bottom:0};if(timeBuckets[bucket][dmMode]>=MAX_PER_BUCKET)return;timeBuckets[bucket][dmMode]++;var nc={text:c.text,mode:dmMode,time:adjTime,style:{fontSize:dmState.fontSize+"px",color:c.color||dmState.color,textShadow:"-1px -1px #000,-1px 1px #000,1px -1px #000,1px 1px #000"}};dmState.comments.push(nc);loadComments.push(nc);});rebuildDanmaku(loadComments);updateDanmakuCount();}';
   html += 'function loadLocalDanmaku(){try{var key=getLocalDanmakuKey();var data=JSON.parse(localStorage.getItem(key)||"[]");dmState.allComments=data;filterAndEmitDanmaku();}catch(e){}}';
 
-  // 弹幕获取（使用 LogVar API，完全采用05版逻辑）
   html += 'var DM_API_BASES=["https://api.danmu.xqful.cn/87654321"];';
   html += 'var DM_CUSTOM_API="";';
   html += 'try{DM_CUSTOM_API=localStorage.getItem("vp_dm_custom_api")||"";}catch(e){}';
   html += 'var DM_WORKING_BASE="";';
   html += 'function dmFetchTimeout(url,ms){return Promise.race([fetch(url).then(function(r){if(!r.ok)throw new Error("status:"+r.status);return r.json();}),new Promise(function(_,rej){setTimeout(function(){rej(new Error("timeout"));},ms);})]);}';
-  html += 'var DM_CORS_PROXIES=[function(u){return"https://proxy.cors.sh/"+u},function(u){return"https://api.allorigins.win/raw?url="+encodeURIComponent(u)}];';
+  // 🐾修复：弹幕代理也去掉 cors.sh
+  html += 'var DM_CORS_PROXIES=[function(u){return"https://api.allorigins.win/raw?url="+encodeURIComponent(u)},function(u){return"https://api.codetabs.com/v1/proxy/?quest="+encodeURIComponent(u)}];';
   html += 'function dmFetchWithProxy(url,ms,idx){if(idx===undefined)idx=0;return dmFetchTimeout(url,ms).catch(function(e){if(idx<DM_CORS_PROXIES.length){return dmFetchTimeout(DM_CORS_PROXIES[idx](url),ms+5000).catch(function(){return dmFetchWithProxy(url,ms,idx+1);});}throw e;});}';
   html += 'function dmGetCache(key){try{var raw=localStorage.getItem(key);if(!raw)return null;var d=JSON.parse(raw);if(Date.now()-d.t>7*24*3600*1000)return null;return d.v;}catch(e){return null;}}';
   html += 'function dmSetCache(key,val){try{localStorage.setItem(key,JSON.stringify({t:Date.now(),v:val}));}catch(e){}}';
@@ -1669,7 +1682,6 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'function saveCustomDmApi(){var input=el("dmCustomApiInput");if(!input)return;var val=input.value.trim();if(val){val=val.replace(/\\/+$/,"");if(val.indexOf("http")!==0)val="https://"+val;}try{if(val){localStorage.setItem("vp_dm_custom_api",val);DM_CUSTOM_API=val;}else{localStorage.removeItem("vp_dm_custom_api");DM_CUSTOM_API="";}showToast(val?"已保存自定义API":"已清除自定义API");}catch(e){}}';
   html += 'window.saveCustomDmApi=saveCustomDmApi;';
 
-  // ========== 初始化 ==========
   html += '(function(){';
   html += 'var video=el("videoPlayer");';
   html += 'video.addEventListener("loadstart",function(){showLoading();});';
@@ -1719,7 +1731,6 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += '  showToast("⚠️ 暂无可用播放源，请尝试切换线路或返回重选", 3000);';
   html += '}';
   html += '})();';
-  html += 'console.log("[PLAYER] script end, episodes=" + episodes.length);';
   html += '<\/script>';
   html += '</body></html>';
 
@@ -2378,6 +2389,7 @@ document.addEventListener('touchend', function(e) {
 (function() {
   var status = document.getElementById('proxyStatus');
   function _hideStatus() { if (status) status.style.display = 'none'; }
+  // 🐾修复：探测改用首个可用代理（allorigins），不再用失效的 cors.sh
   _fetchCompat(CORS_PROXIES[0]('https://cj.ffzyapi.com/api.php/provide/vod?ac=list'), 8000,
     function(text) {
       if (status) { status.textContent = '✓ 云代理已连接'; status.classList.remove('proxy-switching'); }
@@ -2405,7 +2417,6 @@ setInterval(_flushData, 30000);
 var _proxySel = document.getElementById('proxySelect');
 if (_proxySel) _proxySel.value = proxyMode;
 
-// 调试入口：直接用测试流打开播放器
 function _testPlayDirect() {
   var testDetail = {
     vod_id: 99999, vod_name: '测试视频', vod_pic: '', vod_remarks: '测试',
@@ -2420,7 +2431,7 @@ loadHomeTypes();
 
 Config.loadAsync(function(idbSettings) {
   State._idbLoaded = true;
-  
+
   if (idbSettings) {
     idbSettings.proxyMode = proxyMode;
     State.settings = idbSettings;
