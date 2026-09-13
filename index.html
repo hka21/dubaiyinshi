@@ -264,10 +264,10 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 
 <script>
 // ========== CORS 代理配置 ==========
+  var CORS_PROXY_PREFIX = 'https://ys.ggy.ccwu.cc/?url=';
 var CORS_PROXIES = [
-  function(url) { return 'https://ys.ggy.ccwu.cc/?url=' + encodeURIComponent(url); },
-  function(url) { return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url); },
-  function(url) { return 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url); }
+  function(url) { return CORS_PROXY_PREFIX + encodeURIComponent(url); },
+  function(url) { return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url); }
 ];
 var proxyMode = 'auto';
 var workingProxyIdx = 0;
@@ -1468,7 +1468,11 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'var dmState = {enabled:true, opacity:0.8, fontSize:20, area:0, color:"#ffffff", delay:0, speed:120, comments:[], allComments:[], fetchedExternal:false};';
   html += 'try{var savedDm=JSON.parse(localStorage.getItem("vp_danmaku_settings")||"{}");if(savedDm.opacity)dmState.opacity=savedDm.opacity;if(savedDm.fontSize)dmState.fontSize=savedDm.fontSize;if(savedDm.area!==undefined)dmState.area=savedDm.area;if(savedDm.color)dmState.color=savedDm.color;if(savedDm.delay!==undefined)dmState.delay=savedDm.delay;if(savedDm.speed)dmState.speed=savedDm.speed;if(savedDm.enabled!==undefined)dmState.enabled=savedDm.enabled;}catch(e){}';
   html += 'try{var ps=JSON.parse(localStorage.getItem("vp_player_settings")||"{}");if(ps.speed)pState.speed=ps.speed;if(ps.isAutoPlay!==undefined)pState.isAutoPlay=ps.isAutoPlay;if(ps.aspectRatio)pState.aspectRatio=ps.aspectRatio;}catch(e){}';
-  html += 'var CORS_PROXIES = parent.CORS_PROXIES;';
+  html += 'var CORS_PROXY_PREFIX = parent.CORS_PROXY_PREFIX || "";';
+  html += 'var CORS_PROXIES = [' +
+  'function(u){return CORS_PROXY_PREFIX + encodeURIComponent(u)},' +
+  'function(u){return "https://api.allorigins.win/raw?url="+encodeURIComponent(u)}' +
+  '];';
   html += 'var workingProxyIdx = 0;';
   html += 'function el(id){return document.getElementById(id);}';
   html += 'function showToast(msg,dur){try{parent.showToast(msg,dur||2000);}catch(e){}}';
@@ -1648,7 +1652,11 @@ function generatePlayerHtml(detail, epIdx, resumeTime) {
   html += 'try{DM_CUSTOM_API=localStorage.getItem("vp_dm_custom_api")||"";}catch(e){}';
   html += 'var DM_WORKING_BASE="";';
   html += 'function dmFetchTimeout(url,ms){return Promise.race([fetch(url).then(function(r){if(!r.ok)throw new Error("status:"+r.status);return r.json();}),new Promise(function(_,rej){setTimeout(function(){rej(new Error("timeout"));},ms);})]);}';
-  html += 'var DM_CORS_PROXIES = parent.CORS_PROXIES;';
+  html += 'var CORS_PROXY_PREFIX = parent.CORS_PROXY_PREFIX || "";';
+  html += 'var DM_CORS_PROXIES = [' +
+  'function(u){return CORS_PROXY_PREFIX + encodeURIComponent(u)},' +
+  'function(u){return "https://api.allorigins.win/raw?url="+encodeURIComponent(u)}' +
+  '];';
   html += 'function dmFetchWithProxy(url,ms,idx){if(idx===undefined)idx=0;return dmFetchTimeout(url,ms).catch(function(e){if(idx<DM_CORS_PROXIES.length){return dmFetchTimeout(DM_CORS_PROXIES[idx](url),ms+5000).catch(function(){return dmFetchWithProxy(url,ms,idx+1);});}throw e;});}';
   html += 'function dmGetCache(key){try{var raw=localStorage.getItem(key);if(!raw)return null;var d=JSON.parse(raw);if(Date.now()-d.t>7*24*3600*1000)return null;return d.v;}catch(e){return null;}}';
   html += 'function dmSetCache(key,val){try{localStorage.setItem(key,JSON.stringify({t:Date.now(),v:val}));}catch(e){}}';
