@@ -267,11 +267,11 @@ body{background:var(--bg);color:var(--text);font-family:-apple-system,BlinkMacSy
 <script>
 // ========== CORS 代理配置 ==========
 // 🐾修复：cors.sh 已失效移除；优先直连（部分CMS已开CORS），失败再依次代理
+// ========== CORS 代理配置 ==========
 var CORS_PROXIES = [
+  function(url) { return 'https://ys.ggy.cwuu.cc/?url=' + encodeURIComponent(url); },
   function(url) { return 'https://api.allorigins.win/raw?url=' + encodeURIComponent(url); },
-  function(url) { return 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url); },
-  function(url) { return 'https://corsproxy.io/?url=' + encodeURIComponent(url); },
-  function(url) { return 'https://cors.isomorphic-git.org/' + url; }
+  function(url) { return 'https://api.codetabs.com/v1/proxy/?quest=' + encodeURIComponent(url); }
 ];
 var proxyMode = 'auto';
 var workingProxyIdx = 0;
